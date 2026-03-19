@@ -1,25 +1,26 @@
 """
 RunPod Serverless Handler: Video Stitcher
 Combines scene video clips + audio into a final video using FFmpeg.
+Uploads the result directly to Supabase Storage via signed URL.
 
 Input:
 {
   "scenes": [
     {
-      "video_url": "https://...",      # Scene video clip (5s webp/mp4)
-      "audio_url": "https://...",      # Scene audio (mp3), null if visual-only
-      "duration_audio": 12.5           # Audio duration in seconds (0 if no audio)
-    },
-    ...
+      "video_url": "https://...",
+      "audio_url": "https://...",
+      "duration_audio": 12.5
+    }
   ],
-  "transition": "none"                 # Future: "crossfade", "fade", etc.
+  "upload_url": "https://...supabase.co/storage/v1/object/upload/sign/...",
+  "upload_token": "...",
+  "public_url": "https://...supabase.co/storage/v1/object/public/..."
 }
 
 Output:
 {
-  "video_base64": "...",               # Final video as base64
-  "mime_type": "video/mp4",
-  "duration": 92.5,                    # Total duration in seconds
+  "video_url": "https://...public url...",
+  "duration": 92.5,
   "file_size_bytes": 12345678
 }
 """
@@ -27,10 +28,9 @@ Output:
 import runpod
 import subprocess
 import os
-import base64
-import requests
 import json
 import time
+import requests
 
 WORK_DIR = "/tmp/stitch"
 
@@ -61,7 +61,7 @@ def get_duration(filepath):
         data = json.loads(result.stdout)
         return float(data["format"]["duration"])
     except (KeyError, ValueError, json.JSONDecodeError):
-        return 5.0  # Default fallback
+        return 5.0
 
 
 def process_scene(scene_index, video_path, audio_path, audio_duration):
@@ -73,11 +73,9 @@ def process_scene(scene_index, video_path, audio_path, audio_duration):
 
     if audio_path and audio_duration > 0:
         if audio_duration > video_duration + 0.5:
-            # Audio is longer: extend video by holding last frame
-            pad_duration = audio_duration - video_duration + 0.5  # Small buffer
+            pad_duration = audio_duration - video_duration + 0.5
             padded_path = os.path.join(WORK_DIR, f"scene_{scene_index:03d}_padded.mp4")
 
-            # Step 1: Pad video with last frame
             subprocess.run([
                 "ffmpeg", "-y",
                 "-i", video_path,
@@ -89,7 +87,6 @@ def process_scene(scene_index, video_path, audio_path, audio_duration):
                 padded_path
             ], check=True, capture_output=True)
 
-            # Step 2: Combine padded video + audio
             subprocess.run([
                 "ffmpeg", "-y",
                 "-i", padded_path,
@@ -100,10 +97,8 @@ def process_scene(scene_index, video_path, audio_path, audio_duration):
                 output_path
             ], check=True, capture_output=True)
 
-            # Cleanup intermediate file
             os.remove(padded_path)
         else:
-            # Video is same length or longer: just combine
             subprocess.run([
                 "ffmpeg", "-y",
                 "-i", video_path,
@@ -116,7 +111,6 @@ def process_scene(scene_index, video_path, audio_path, audio_duration):
                 output_path
             ], check=True, capture_output=True)
     else:
-        # No audio: just convert video to standard format
         subprocess.run([
             "ffmpeg", "-y",
             "-i", video_path,
@@ -156,16 +150,45 @@ def concatenate_scenes(scene_files):
     return output_path
 
 
+def upload_to_storage(filepath, upload_url, upload_token):
+    """Upload the final video to Supabase Storage via signed URL."""
+    file_size = os.path.getsize(filepath)
+    print(f"  Uploading {file_size / (1024*1024):.1f}MB to Supabase Storage...")
+
+    with open(filepath, "rb") as f:
+        response = requests.put(
+            upload_url,
+            headers={
+                "Authorization": f"Bearer {upload_token}",
+                "Content-Type": "video/mp4",
+            },
+            data=f,
+            timeout=300,
+        )
+
+    if response.status_code >= 400:
+        print(f"  Upload error: {response.status_code} - {response.text[:300]}")
+        raise Exception(f"Upload failed: {response.status_code}")
+
+    print(f"  Upload complete!")
+    return True
+
+
 def handler(event):
     """Main RunPod handler."""
     start_time = time.time()
     input_data = event["input"]
     scenes = input_data.get("scenes", [])
+    upload_url = input_data.get("upload_url")
+    upload_token = input_data.get("upload_token")
+    public_url = input_data.get("public_url")
 
     if not scenes:
         return {"error": "No scenes provided"}
 
-    # Create work directory
+    if not upload_url or not upload_token:
+        return {"error": "upload_url and upload_token required"}
+
     os.makedirs(WORK_DIR, exist_ok=True)
 
     print(f"=== Stitching {len(scenes)} scenes ===")
@@ -184,7 +207,7 @@ def handler(event):
         if audio_url:
             download_file(audio_url, os.path.join(WORK_DIR, f"scene_{i:03d}_audio.mp3"))
 
-    # Step 2: Process each scene (combine video + audio)
+    # Step 2: Process each scene
     print("\n--- Step 2: Processing scenes ---")
     scene_files = []
     for i, scene in enumerate(scenes):
@@ -196,24 +219,28 @@ def handler(event):
             output = process_scene(i, video_path, audio_path, audio_duration)
             scene_files.append(output)
         except subprocess.CalledProcessError as e:
-            print(f"  ERROR processing scene {i}: {e.stderr[:500] if e.stderr else str(e)}")
-            return {"error": f"FFmpeg error on scene {i}: {str(e)[:200]}"}
+            stderr = e.stderr.decode() if e.stderr else str(e)
+            print(f"  ERROR processing scene {i}: {stderr[:500]}")
+            return {"error": f"FFmpeg error on scene {i}: {stderr[:200]}"}
 
-    # Step 3: Concatenate all scenes
+    # Step 3: Concatenate
     print("\n--- Step 3: Concatenating ---")
     try:
         final_path = concatenate_scenes(scene_files)
     except subprocess.CalledProcessError as e:
-        print(f"  ERROR concatenating: {e.stderr[:500] if e.stderr else str(e)}")
-        return {"error": f"FFmpeg concat error: {str(e)[:200]}"}
+        stderr = e.stderr.decode() if e.stderr else str(e)
+        print(f"  ERROR concatenating: {stderr[:500]}")
+        return {"error": f"FFmpeg concat error: {stderr[:200]}"}
 
-    # Step 4: Read result and encode as base64
-    print("\n--- Step 4: Encoding result ---")
     file_size = os.path.getsize(final_path)
     final_duration = get_duration(final_path)
 
-    with open(final_path, "rb") as f:
-        video_base64 = base64.b64encode(f.read()).decode("utf-8")
+    # Step 4: Upload directly to Supabase Storage
+    print("\n--- Step 4: Uploading to storage ---")
+    try:
+        upload_to_storage(final_path, upload_url, upload_token)
+    except Exception as e:
+        return {"error": f"Upload failed: {str(e)[:200]}"}
 
     # Cleanup
     import shutil
@@ -223,8 +250,7 @@ def handler(event):
     print(f"\n=== Done! Duration: {final_duration:.1f}s, Size: {file_size / (1024*1024):.1f}MB, Elapsed: {elapsed:.1f}s ===")
 
     return {
-        "video_base64": video_base64,
-        "mime_type": "video/mp4",
+        "video_url": public_url,
         "duration": round(final_duration, 1),
         "file_size_bytes": file_size,
         "processing_time": round(elapsed, 1),
