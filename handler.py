@@ -1,6 +1,7 @@
 """
 RunPod Serverless Handler: Video Stitcher
 Combines scene video clips + audio into a final video using FFmpeg.
+Optionally mixes background music underneath dialogue.
 Uploads the result directly to Supabase Storage via signed URL.
 
 Input:
@@ -12,6 +13,8 @@ Input:
       "duration_audio": 12.5
     }
   ],
+  "background_music_url": "https://...",     // optional
+  "background_music_volume": -18,            // dB, optional (default: -18)
   "upload_url": "https://...supabase.co/storage/v1/object/upload/sign/...",
   "upload_token": "...",
   "public_url": "https://...supabase.co/storage/v1/object/public/..."
@@ -150,6 +153,40 @@ def concatenate_scenes(scene_files):
     return output_path
 
 
+def mix_background_music(video_path, music_path, volume_db=-18):
+    """Mix background music under the video's existing audio track.
+
+    Uses FFmpeg amerge to layer music underneath dialogue at reduced volume.
+    Music loops if shorter than video, and fades out in the last 3 seconds.
+    """
+    output_path = os.path.join(WORK_DIR, "final_with_music.mp4")
+    video_duration = get_duration(video_path)
+    fade_start = max(0, video_duration - 3)
+
+    # Filter chain:
+    # 1. Loop music to cover full video duration
+    # 2. Apply volume reduction (e.g. -18dB) so it's subtle behind dialogue
+    # 3. Fade out music in last 3 seconds
+    # 4. Mix with original video audio (amerge → pan to stereo)
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-stream_loop", "-1", "-i", music_path,
+        "-filter_complex",
+        f"[1:a]volume={volume_db}dB,afade=t=out:st={fade_start}:d=3[music];"
+        f"[0:a][music]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+        "-map", "0:v",
+        "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "128k",
+        "-shortest",
+        output_path
+    ], check=True, capture_output=True)
+
+    print(f"  Mixed background music at {volume_db}dB, fade out at {fade_start:.1f}s")
+    return output_path
+
+
 def upload_to_storage(filepath, upload_url, upload_token):
     """Upload the final video to Supabase Storage via signed URL."""
     file_size = os.path.getsize(filepath)
@@ -179,6 +216,8 @@ def handler(event):
     start_time = time.time()
     input_data = event["input"]
     scenes = input_data.get("scenes", [])
+    background_music_url = input_data.get("background_music_url")
+    background_music_volume = input_data.get("background_music_volume", -18)
     upload_url = input_data.get("upload_url")
     upload_token = input_data.get("upload_token")
     public_url = input_data.get("public_url")
@@ -207,6 +246,17 @@ def handler(event):
         if audio_url:
             download_file(audio_url, os.path.join(WORK_DIR, f"scene_{i:03d}_audio.mp3"))
 
+    # Download background music if provided
+    music_path = None
+    if background_music_url:
+        music_path = os.path.join(WORK_DIR, "background_music.mp3")
+        try:
+            download_file(background_music_url, music_path)
+            print(f"  Background music downloaded ({background_music_volume}dB)")
+        except Exception as e:
+            print(f"  WARNING: Failed to download background music: {e}")
+            music_path = None
+
     # Step 2: Process each scene
     print("\n--- Step 2: Processing scenes ---")
     scene_files = []
@@ -231,6 +281,16 @@ def handler(event):
         stderr = e.stderr.decode() if e.stderr else str(e)
         print(f"  ERROR concatenating: {stderr[:500]}")
         return {"error": f"FFmpeg concat error: {stderr[:200]}"}
+
+    # Step 3.5: Mix background music (if available)
+    if music_path and os.path.exists(music_path):
+        print("\n--- Step 3.5: Mixing background music ---")
+        try:
+            final_path = mix_background_music(final_path, music_path, background_music_volume)
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.decode() if e.stderr else str(e)
+            print(f"  WARNING: Music mixing failed, using video without music: {stderr[:300]}")
+            # Non-fatal: continue with the concatenated video without music
 
     file_size = os.path.getsize(final_path)
     final_duration = get_duration(final_path)
