@@ -211,10 +211,74 @@ def upload_to_storage(filepath, upload_url, upload_token):
     return True
 
 
+def reencode_clip(video_url, upload_url, upload_token, public_url):
+    """Re-encode a single video clip to H264 High yuv420p for browser compatibility.
+    Wan 2.2 outputs yuv444p which many browsers cannot play.
+    """
+    os.makedirs(WORK_DIR, exist_ok=True)
+    input_path = os.path.join(WORK_DIR, "reencode_input.mp4")
+    output_path = os.path.join(WORK_DIR, "reencode_output.mp4")
+
+    download_file(video_url, input_path)
+
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=pix_fmt",
+         "-of", "csv=p=0", input_path],
+        capture_output=True, text=True
+    )
+    pix_fmt = result.stdout.strip().split("\n")[0]
+    print(f"  Pixel format: {pix_fmt}")
+
+    if pix_fmt == "yuv420p":
+        print("  Already compatible, uploading as-is...")
+        upload_to_storage(input_path, upload_url, upload_token)
+        duration = get_duration(input_path)
+        file_size = os.path.getsize(input_path)
+    else:
+        print(f"  Re-encoding {pix_fmt} -> yuv420p...")
+        subprocess.run([
+            "ffmpeg", "-y", "-i", input_path,
+            "-c:v", "libx264", "-profile:v", "high",
+            "-pix_fmt", "yuv420p", "-preset", "fast",
+            "-movflags", "+faststart",
+            output_path
+        ], check=True, capture_output=True)
+        upload_to_storage(output_path, upload_url, upload_token)
+        duration = get_duration(output_path)
+        file_size = os.path.getsize(output_path)
+
+    import shutil
+    shutil.rmtree(WORK_DIR, ignore_errors=True)
+
+    return {
+        "video_url": public_url,
+        "duration": round(duration, 1),
+        "file_size_bytes": file_size,
+    }
+
+
 def handler(event):
-    """Main RunPod handler."""
+    """Main RunPod handler.
+    Supports actions: stitch (default), reencode (single clip codec fix).
+    """
     start_time = time.time()
     input_data = event["input"]
+    action = input_data.get("action", "stitch")
+
+    if action == "reencode":
+        video_url = input_data.get("video_url")
+        upload_url = input_data.get("upload_url")
+        upload_token = input_data.get("upload_token")
+        public_url = input_data.get("public_url")
+        if not video_url or not upload_url or not upload_token:
+            return {"error": "video_url, upload_url, upload_token required"}
+        try:
+            result = reencode_clip(video_url, upload_url, upload_token, public_url)
+            result["processing_time"] = round(time.time() - start_time, 1)
+            return result
+        except Exception as e:
+            return {"error": f"Reencode failed: {str(e)[:200]}"}
+
     scenes = input_data.get("scenes", [])
     background_music_url = input_data.get("background_music_url")
     background_music_volume = input_data.get("background_music_volume", -18)
