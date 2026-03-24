@@ -67,14 +67,25 @@ def get_duration(filepath):
         return 5.0
 
 
-def process_scene(scene_index, video_path, audio_path, audio_duration):
+def process_scene(scene_index, video_path, audio_path, audio_duration, keep_embedded_audio=False):
     """Process a single scene: combine video + audio, matching durations."""
     output_path = os.path.join(WORK_DIR, f"scene_{scene_index:03d}_final.mp4")
 
     video_duration = get_duration(video_path)
-    print(f"  Scene {scene_index}: video={video_duration:.1f}s, audio={audio_duration:.1f}s")
+    print(f"  Scene {scene_index}: video={video_duration:.1f}s, audio={audio_duration:.1f}s, embedded={keep_embedded_audio}")
 
-    if audio_path and audio_duration > 0:
+    if keep_embedded_audio:
+        # Video already has audio baked in (e.g. VEED Fabric lip-sync) — re-encode but keep audio
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-c:v", "libx264", "-preset", "fast",
+            "-pix_fmt", "yuv420p",
+            "-r", "24",
+            "-c:a", "aac", "-b:a", "128k",
+            output_path
+        ], check=True, capture_output=True)
+    elif audio_path and audio_duration > 0:
         if audio_duration > video_duration + 0.5:
             pad_duration = audio_duration - video_duration + 0.5
             padded_path = os.path.join(WORK_DIR, f"scene_{scene_index:03d}_padded.mp4")
@@ -328,9 +339,10 @@ def handler(event):
         video_path = os.path.join(WORK_DIR, f"scene_{i:03d}_video.webp")
         audio_path = os.path.join(WORK_DIR, f"scene_{i:03d}_audio.mp3") if scene.get("audio_url") else None
         audio_duration = scene.get("duration_audio", 0)
+        keep_embedded = scene.get("keep_embedded_audio", False)
 
         try:
-            output = process_scene(i, video_path, audio_path, audio_duration)
+            output = process_scene(i, video_path, audio_path, audio_duration, keep_embedded)
             scene_files.append(output)
         except subprocess.CalledProcessError as e:
             stderr = e.stderr.decode() if e.stderr else str(e)
