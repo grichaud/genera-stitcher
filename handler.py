@@ -392,11 +392,24 @@ def handler(event):
     if uploaded:
         result["video_url"] = public_url
     else:
-        # Return video as base64 so the caller can upload it server-side
-        import base64
-        with open(final_path, "rb") as f:
-            result["video_base64"] = base64.b64encode(f.read()).decode("ascii")
-        print(f"  Returning video as base64 ({file_size / (1024*1024):.1f}MB)")
+        # Upload to temp file hosting so caller can download and persist server-side
+        print("  Uploading to temp hosting (0x0.st)...")
+        try:
+            with open(final_path, "rb") as f:
+                temp_resp = requests.post(
+                    "https://0x0.st",
+                    files={"file": ("video.mp4", f, "video/mp4")},
+                    timeout=300,
+                )
+            if temp_resp.status_code == 200:
+                result["temp_video_url"] = temp_resp.text.strip()
+                print(f"  Temp URL: {result['temp_video_url']}")
+            else:
+                print(f"  Temp upload failed: {temp_resp.status_code} {temp_resp.text[:200]}")
+                result["error"] = f"Both Supabase and temp upload failed"
+        except Exception as e:
+            print(f"  Temp upload error: {e}")
+            result["error"] = f"Both Supabase and temp upload failed: {str(e)[:100]}"
 
     # Cleanup
     import shutil
