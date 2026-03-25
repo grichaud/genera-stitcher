@@ -156,7 +156,8 @@ def concatenate_scenes(scene_files):
         "-i", concat_list,
         "-c:v", "libx264", "-preset", "fast",
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k",
+        "-crf", "28",
+        "-c:a", "aac", "-b:a", "96k",
         "-movflags", "+faststart",
         output_path
     ], check=True, capture_output=True)
