@@ -125,15 +125,21 @@ def process_scene(scene_index, video_path, audio_path, audio_duration, keep_embe
                 output_path
             ], check=True, capture_output=True)
     else:
-        subprocess.run([
+        # No separate audio file — trim to duration_audio if specified
+        cmd = [
             "ffmpeg", "-y",
+        ]
+        if audio_duration > 0:
+            cmd += ["-t", str(audio_duration)]
+        cmd += [
             "-i", video_path,
             "-c:v", "libx264", "-preset", "fast",
             "-pix_fmt", "yuv420p",
             "-r", "24",
             "-an",
             output_path
-        ], check=True, capture_output=True)
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
 
     final_duration = get_duration(output_path)
     print(f"  Scene {scene_index} done: {final_duration:.1f}s")
