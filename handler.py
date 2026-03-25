@@ -125,19 +125,19 @@ def process_scene(scene_index, video_path, audio_path, audio_duration, keep_embe
                 output_path
             ], check=True, capture_output=True)
     else:
-        # No separate audio file — generate silent audio track to prevent
-        # concat drift (clips without audio desync the entire timeline)
-        trim_args = ["-t", str(audio_duration)] if audio_duration > 0 else []
+        # No separate audio file — generate silent audio track so
+        # concat filter can join all clips (requires both v+a streams)
+        target_dur = audio_duration if audio_duration > 0 else get_duration(video_path)
         subprocess.run([
             "ffmpeg", "-y",
-            *trim_args,
             "-i", video_path,
-            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+            "-f", "lavfi", "-t", str(target_dur),
+            "-i", f"anullsrc=r=44100:cl=stereo",
+            "-t", str(target_dur),
             "-c:v", "libx264", "-preset", "fast",
             "-pix_fmt", "yuv420p",
             "-r", "24",
             "-c:a", "aac", "-b:a", "128k",
-            "-shortest",
             output_path
         ], check=True, capture_output=True)
 
