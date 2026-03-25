@@ -68,76 +68,33 @@ def get_duration(filepath):
 
 
 def process_scene(scene_index, video_path, audio_path, audio_duration, keep_embedded_audio=False):
-    """Process a single scene: combine video + audio, matching durations."""
+    """Re-encode a scene uniformly. All clips should have embedded audio."""
     output_path = os.path.join(WORK_DIR, f"scene_{scene_index:03d}_final.mp4")
-
     video_duration = get_duration(video_path)
     print(f"  Scene {scene_index}: video={video_duration:.1f}s, audio={audio_duration:.1f}s, embedded={keep_embedded_audio}")
 
-    if keep_embedded_audio:
-        # Video already has audio baked in (e.g. VEED Fabric lip-sync) — re-encode but keep audio
+    if keep_embedded_audio or not audio_path:
+        # Audio is baked in (Fabric lip-sync or pre-combined b-roll)
         subprocess.run([
             "ffmpeg", "-y",
             "-i", video_path,
             "-c:v", "libx264", "-preset", "fast",
-            "-pix_fmt", "yuv420p",
-            "-r", "24",
-            "-c:a", "aac", "-b:a", "128k",
+            "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            "-pix_fmt", "yuv420p", "-r", "24",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
             output_path
         ], check=True, capture_output=True)
-    elif audio_path and audio_duration > 0:
-        if audio_duration > video_duration + 0.5:
-            pad_duration = audio_duration - video_duration + 0.5
-            padded_path = os.path.join(WORK_DIR, f"scene_{scene_index:03d}_padded.mp4")
-
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-i", video_path,
-                "-vf", f"tpad=stop_mode=clone:stop_duration={pad_duration}",
-                "-c:v", "libx264", "-preset", "fast",
-                "-pix_fmt", "yuv420p",
-                "-r", "24",
-                "-an",
-                padded_path
-            ], check=True, capture_output=True)
-
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-i", padded_path,
-                "-i", audio_path,
-                "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "128k",
-                "-shortest",
-                output_path
-            ], check=True, capture_output=True)
-
-            os.remove(padded_path)
-        else:
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-i", video_path,
-                "-i", audio_path,
-                "-c:v", "libx264", "-preset", "fast",
-                "-pix_fmt", "yuv420p",
-                "-r", "24",
-                "-c:a", "aac", "-b:a", "128k",
-                "-shortest",
-                output_path
-            ], check=True, capture_output=True)
     else:
-        # No separate audio file — generate silent audio track so
-        # concat filter can join all clips (requires both v+a streams)
-        target_dur = audio_duration if audio_duration > 0 else get_duration(video_path)
+        # Legacy fallback: separate audio
         subprocess.run([
             "ffmpeg", "-y",
             "-i", video_path,
-            "-f", "lavfi", "-t", str(target_dur),
-            "-i", f"anullsrc=r=44100:cl=stereo",
-            "-t", str(target_dur),
+            "-i", audio_path,
+            "-t", str(audio_duration) if audio_duration > 0 else str(video_duration),
             "-c:v", "libx264", "-preset", "fast",
-            "-pix_fmt", "yuv420p",
-            "-r", "24",
-            "-c:a", "aac", "-b:a", "128k",
+            "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            "-pix_fmt", "yuv420p", "-r", "24",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
             output_path
         ], check=True, capture_output=True)
 
@@ -147,56 +104,24 @@ def process_scene(scene_index, video_path, audio_path, audio_duration, keep_embe
 
 
 def concatenate_scenes(scene_files):
-    """Concatenate scenes using the concat FILTER with normalization.
-    Scales all video to 1280x720@24fps and audio to 44100Hz stereo
-    before concatenating, ensuring no stream mismatch errors.
-    """
+    """Concatenate uniform scene clips using concat demuxer."""
+    concat_list = os.path.join(WORK_DIR, "concat.txt")
+    with open(concat_list, "w") as f:
+        for scene_file in scene_files:
+            f.write(f"file '{scene_file}'\n")
+
     output_path = os.path.join(WORK_DIR, "final_video.mp4")
 
-    cmd = ["ffmpeg", "-y"]
-
-    # Add all input files
-    for scene_file in scene_files:
-        cmd += ["-i", scene_file]
-
-    n = len(scene_files)
-
-    # Build filter: normalize each clip, then concat
-    filter_parts = []
-    for i in range(n):
-        filter_parts.append(
-            f"[{i}:v]scale=1280:720:force_original_aspect_ratio=decrease,"
-            f"pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24[v{i}];"
-        )
-        filter_parts.append(
-            f"[{i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}];"
-        )
-
-    concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
-    filter_str = "".join(filter_parts) + concat_inputs + f"concat=n={n}:v=1:a=1[v][a]"
-
-    cmd += [
-        "-filter_complex", filter_str,
-        "-map", "[v]",
-        "-map", "[a]",
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", concat_list,
         "-c:v", "libx264", "-preset", "fast",
-        "-pix_fmt", "yuv420p",
-        "-crf", "28",
-        "-c:a", "aac", "-b:a", "96k",
+        "-pix_fmt", "yuv420p", "-crf", "28",
+        "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
         "-movflags", "+faststart",
         output_path
-    ]
-
-    print(f"  Concat filter: {n} scenes (normalized 1280x720@24fps, 44100Hz)")
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
-        stderr = result.stderr.decode() if result.stderr else ""
-        # Show the actual error, not the ffmpeg banner
-        error_lines = [l for l in stderr.split("
-") if l.strip() and not l.startswith("  ") and "Copyright" not in l and "built with" not in l and "configuration" not in l and "lib" not in l]
-        error_msg = "
-".join(error_lines[-10:]) if error_lines else stderr[-500:]
-        raise subprocess.CalledProcessError(result.returncode, cmd, stderr=error_msg.encode())
+    ], check=True, capture_output=True)
 
     return output_path
 
@@ -305,6 +230,66 @@ def reencode_clip(video_url, upload_url, upload_token, public_url):
     }
 
 
+def combine_clip(video_url, audio_url, duration, upload_url, upload_token, public_url):
+    """Combine a video clip with audio (or silence) into a single MP4.
+    Normalizes to 1280x720@24fps, AAC 44100Hz stereo.
+    Trims to exact duration so all clips are uniform for concat.
+    """
+    os.makedirs(WORK_DIR, exist_ok=True)
+    input_video = os.path.join(WORK_DIR, "combine_video.mp4")
+    output_path = os.path.join(WORK_DIR, "combine_output.mp4")
+
+    download_file(video_url, input_video)
+
+    if audio_url:
+        input_audio = os.path.join(WORK_DIR, "combine_audio.mp3")
+        download_file(audio_url, input_audio)
+
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", input_video,
+            "-i", input_audio,
+            "-t", str(duration),
+            "-c:v", "libx264", "-preset", "fast",
+            "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            "-pix_fmt", "yuv420p", "-r", "24",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+            "-movflags", "+faststart",
+            output_path
+        ], check=True, capture_output=True)
+        os.remove(input_audio)
+    else:
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", input_video,
+            "-f", "lavfi", "-t", str(duration),
+            "-i", "anullsrc=r=44100:cl=stereo",
+            "-t", str(duration),
+            "-c:v", "libx264", "-preset", "fast",
+            "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            "-pix_fmt", "yuv420p", "-r", "24",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            output_path
+        ], check=True, capture_output=True)
+
+    os.remove(input_video)
+    final_dur = get_duration(output_path)
+    file_size = os.path.getsize(output_path)
+    print(f"  Combined: {final_dur:.1f}s, {file_size / (1024*1024):.1f}MB (audio={bool(audio_url)})")
+
+    upload_to_storage(output_path, upload_url, upload_token)
+
+    import shutil
+    shutil.rmtree(WORK_DIR, ignore_errors=True)
+
+    return {
+        "video_url": public_url,
+        "duration": round(final_dur, 1),
+        "file_size_bytes": file_size,
+    }
+
+
 def handler(event):
     """Main RunPod handler.
     Supports actions: stitch (default), reencode (single clip codec fix).
@@ -327,7 +312,23 @@ def handler(event):
         except Exception as e:
             return {"error": f"Reencode failed: {str(e)[:200]}"}
 
-    scenes = input_data.get("scenes", [])
+    if action == "combine":
+        video_url = input_data.get("video_url")
+        audio_url = input_data.get("audio_url")
+        duration = input_data.get("duration", 5)
+        upload_url = input_data.get("upload_url")
+        upload_token = input_data.get("upload_token")
+        public_url = input_data.get("public_url")
+        if not video_url or not upload_url or not upload_token:
+            return {"error": "video_url, upload_url, upload_token required for combine"}
+        try:
+            result = combine_clip(video_url, audio_url, duration, upload_url, upload_token, public_url)
+            result["processing_time"] = round(time.time() - start_time, 1)
+            return result
+        except Exception as e:
+            return {"error": f"Combine failed: {str(e)[:200]}"}
+
+        scenes = input_data.get("scenes", [])
     background_music_url = input_data.get("background_music_url")
     background_music_volume = input_data.get("background_music_volume", -18)
     upload_url = input_data.get("upload_url")
