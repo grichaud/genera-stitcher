@@ -125,21 +125,21 @@ def process_scene(scene_index, video_path, audio_path, audio_duration, keep_embe
                 output_path
             ], check=True, capture_output=True)
     else:
-        # No separate audio file — trim to duration_audio if specified
-        cmd = [
+        # No separate audio file — generate silent audio track to prevent
+        # concat drift (clips without audio desync the entire timeline)
+        trim_args = ["-t", str(audio_duration)] if audio_duration > 0 else []
+        subprocess.run([
             "ffmpeg", "-y",
-        ]
-        if audio_duration > 0:
-            cmd += ["-t", str(audio_duration)]
-        cmd += [
+            *trim_args,
             "-i", video_path,
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
             "-c:v", "libx264", "-preset", "fast",
             "-pix_fmt", "yuv420p",
             "-r", "24",
-            "-an",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
             output_path
-        ]
-        subprocess.run(cmd, check=True, capture_output=True)
+        ], check=True, capture_output=True)
 
     final_duration = get_duration(output_path)
     print(f"  Scene {scene_index} done: {final_duration:.1f}s")
