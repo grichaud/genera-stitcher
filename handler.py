@@ -147,26 +147,42 @@ def process_scene(scene_index, video_path, audio_path, audio_duration, keep_embe
 
 
 def concatenate_scenes(scene_files):
-    """Concatenate all processed scene videos into one."""
-    concat_list = os.path.join(WORK_DIR, "concat.txt")
-    with open(concat_list, "w") as f:
-        for scene_file in scene_files:
-            f.write(f"file '{scene_file}'\n")
-
+    """Concatenate scenes using the concat FILTER (not demuxer).
+    The concat filter decodes then re-encodes, avoiding audio/video
+    drift that the concat demuxer causes at clip boundaries.
+    All input clips MUST have both video and audio streams.
+    """
     output_path = os.path.join(WORK_DIR, "final_video.mp4")
 
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", concat_list,
+    cmd = ["ffmpeg", "-y"]
+
+    # Add all input files
+    for scene_file in scene_files:
+        cmd += ["-i", scene_file]
+
+    n = len(scene_files)
+
+    # Build filter: [0:v][0:a][1:v][1:a]...concat=n=N:v=1:a=1[v][a]
+    filter_parts = []
+    for i in range(n):
+        filter_parts.append(f"[{i}:v][{i}:a]")
+    filter_str = "".join(filter_parts) + f"concat=n={n}:v=1:a=1[v][a]"
+
+    cmd += [
+        "-filter_complex", filter_str,
+        "-map", "[v]",
+        "-map", "[a]",
         "-c:v", "libx264", "-preset", "fast",
         "-pix_fmt", "yuv420p",
         "-crf", "28",
         "-c:a", "aac", "-b:a", "96k",
+        "-ar", "44100",
         "-movflags", "+faststart",
         output_path
-    ], check=True, capture_output=True)
+    ]
+
+    print(f"  Concat filter: {n} scenes")
+    subprocess.run(cmd, check=True, capture_output=True)
 
     return output_path
 
