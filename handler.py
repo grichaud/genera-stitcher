@@ -300,8 +300,8 @@ def handler(event):
     if not scenes:
         return {"error": "No scenes provided"}
 
-    if not upload_url or not upload_token:
-        return {"error": "upload_url and upload_token required"}
+    # upload_url/upload_token are optional — if not provided or upload fails,
+    # video is returned as base64 in the output for server-side upload.
 
     os.makedirs(WORK_DIR, exist_ok=True)
 
@@ -371,26 +371,40 @@ def handler(event):
     file_size = os.path.getsize(final_path)
     final_duration = get_duration(final_path)
 
-    # Step 4: Upload directly to Supabase Storage
-    print("\n--- Step 4: Uploading to storage ---")
-    try:
-        upload_to_storage(final_path, upload_url, upload_token)
-    except Exception as e:
-        return {"error": f"Upload failed: {str(e)[:200]}"}
+    # Step 4: Try uploading to Supabase Storage, fallback to base64 output
+    uploaded = False
+    if upload_url and upload_token:
+        print("\n--- Step 4: Uploading to storage ---")
+        try:
+            upload_to_storage(final_path, upload_url, upload_token)
+            uploaded = True
+        except Exception as e:
+            print(f"  Upload failed ({e}), falling back to base64 output")
+
+    elapsed = time.time() - start_time
+
+    result = {
+        "duration": round(final_duration, 1),
+        "file_size_bytes": file_size,
+        "processing_time": round(elapsed, 1),
+    }
+
+    if uploaded:
+        result["video_url"] = public_url
+    else:
+        # Return video as base64 so the caller can upload it server-side
+        import base64
+        with open(final_path, "rb") as f:
+            result["video_base64"] = base64.b64encode(f.read()).decode("ascii")
+        print(f"  Returning video as base64 ({file_size / (1024*1024):.1f}MB)")
 
     # Cleanup
     import shutil
     shutil.rmtree(WORK_DIR, ignore_errors=True)
 
-    elapsed = time.time() - start_time
     print(f"\n=== Done! Duration: {final_duration:.1f}s, Size: {file_size / (1024*1024):.1f}MB, Elapsed: {elapsed:.1f}s ===")
 
-    return {
-        "video_url": public_url,
-        "duration": round(final_duration, 1),
-        "file_size_bytes": file_size,
-        "processing_time": round(elapsed, 1),
-    }
+    return result
 
 
 runpod.serverless.start({"handler": handler})
