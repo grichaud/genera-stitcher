@@ -147,10 +147,9 @@ def process_scene(scene_index, video_path, audio_path, audio_duration, keep_embe
 
 
 def concatenate_scenes(scene_files):
-    """Concatenate scenes using the concat FILTER (not demuxer).
-    The concat filter decodes then re-encodes, avoiding audio/video
-    drift that the concat demuxer causes at clip boundaries.
-    All input clips MUST have both video and audio streams.
+    """Concatenate scenes using the concat FILTER with normalization.
+    Scales all video to 1280x720@24fps and audio to 44100Hz stereo
+    before concatenating, ensuring no stream mismatch errors.
     """
     output_path = os.path.join(WORK_DIR, "final_video.mp4")
 
@@ -162,11 +161,19 @@ def concatenate_scenes(scene_files):
 
     n = len(scene_files)
 
-    # Build filter: [0:v][0:a][1:v][1:a]...concat=n=N:v=1:a=1[v][a]
+    # Build filter: normalize each clip, then concat
     filter_parts = []
     for i in range(n):
-        filter_parts.append(f"[{i}:v][{i}:a]")
-    filter_str = "".join(filter_parts) + f"concat=n={n}:v=1:a=1[v][a]"
+        filter_parts.append(
+            f"[{i}:v]scale=1280:720:force_original_aspect_ratio=decrease,"
+            f"pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24[v{i}];"
+        )
+        filter_parts.append(
+            f"[{i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}];"
+        )
+
+    concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
+    filter_str = "".join(filter_parts) + concat_inputs + f"concat=n={n}:v=1:a=1[v][a]"
 
     cmd += [
         "-filter_complex", filter_str,
@@ -176,13 +183,20 @@ def concatenate_scenes(scene_files):
         "-pix_fmt", "yuv420p",
         "-crf", "28",
         "-c:a", "aac", "-b:a", "96k",
-        "-ar", "44100",
         "-movflags", "+faststart",
         output_path
     ]
 
-    print(f"  Concat filter: {n} scenes")
-    subprocess.run(cmd, check=True, capture_output=True)
+    print(f"  Concat filter: {n} scenes (normalized 1280x720@24fps, 44100Hz)")
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        stderr = result.stderr.decode() if result.stderr else ""
+        # Show the actual error, not the ffmpeg banner
+        error_lines = [l for l in stderr.split("
+") if l.strip() and not l.startswith("  ") and "Copyright" not in l and "built with" not in l and "configuration" not in l and "lib" not in l]
+        error_msg = "
+".join(error_lines[-10:]) if error_lines else stderr[-500:]
+        raise subprocess.CalledProcessError(result.returncode, cmd, stderr=error_msg.encode())
 
     return output_path
 
