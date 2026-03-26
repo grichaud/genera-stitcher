@@ -255,7 +255,7 @@ def combine_clip(video_url, audio_url, duration, upload_url, upload_token, publi
             "ffmpeg", "-y",
             "-i", input_video,
             "-i", input_audio,
-            "-t", str(duration),
+            "-shortest",
             "-c:v", "libx264", "-preset", "fast",
             "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
             "-pix_fmt", "yuv420p", "-r", "24",
