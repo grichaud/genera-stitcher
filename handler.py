@@ -261,10 +261,10 @@ def combine_clip(video_url, audio_url, duration, upload_url, upload_token, publi
     else:
         subprocess.run([
             "ffmpeg", "-y",
+            "-t", str(duration),
             "-i", input_video,
             "-f", "lavfi", "-t", str(duration),
             "-i", "anullsrc=r=44100:cl=stereo",
-            "-t", str(duration),
             "-c:v", "libx264", "-preset", "fast",
             "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
             "-pix_fmt", "yuv420p", "-r", "24",
