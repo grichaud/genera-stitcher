@@ -328,7 +328,7 @@ def handler(event):
         except Exception as e:
             return {"error": f"Combine failed: {str(e)[:200]}"}
 
-        scenes = input_data.get("scenes", [])
+    scenes = input_data.get("scenes", [])
     background_music_url = input_data.get("background_music_url")
     background_music_volume = input_data.get("background_music_volume", -18)
     upload_url = input_data.get("upload_url")
