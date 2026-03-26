@@ -68,35 +68,22 @@ def get_duration(filepath):
 
 
 def process_scene(scene_index, video_path, audio_path, audio_duration, keep_embedded_audio=False):
-    """Re-encode a scene uniformly. All clips should have embedded audio."""
+    """Pass through scene clip. All clips should already have embedded audio.
+    Uses stream copy to avoid re-encoding artifacts (drift from frame rate conversion).
+    The only re-encode happens in concatenate_scenes.
+    """
     output_path = os.path.join(WORK_DIR, f"scene_{scene_index:03d}_final.mp4")
     video_duration = get_duration(video_path)
-    print(f"  Scene {scene_index}: video={video_duration:.1f}s, audio={audio_duration:.1f}s, embedded={keep_embedded_audio}")
+    print(f"  Scene {scene_index}: video={video_duration:.1f}s, embedded={keep_embedded_audio}, copy-through")
 
-    if keep_embedded_audio or not audio_path:
-        # Audio is baked in (Fabric lip-sync or pre-combined b-roll)
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-c:v", "libx264", "-preset", "fast",
-            "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
-            "-pix_fmt", "yuv420p", "-r", "24",
-            "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-            output_path
-        ], check=True, capture_output=True)
-    else:
-        # Legacy fallback: separate audio
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-i", audio_path,
-            "-t", str(audio_duration) if audio_duration > 0 else str(video_duration),
-            "-c:v", "libx264", "-preset", "fast",
-            "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
-            "-pix_fmt", "yuv420p", "-r", "24",
-            "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-            output_path
-        ], check=True, capture_output=True)
+    # Stream copy — no re-encode, preserves exact A/V sync
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-c", "copy",
+        "-movflags", "+faststart",
+        output_path
+    ], check=True, capture_output=True)
 
     final_duration = get_duration(output_path)
     print(f"  Scene {scene_index} done: {final_duration:.1f}s")
