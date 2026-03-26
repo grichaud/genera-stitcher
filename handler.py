@@ -126,10 +126,8 @@ def concatenate_scenes(scene_files):
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
         stderr = result.stderr.decode() if result.stderr else ""
-        error_lines = [l for l in stderr.split("
-") if l.strip() and "Copyright" not in l and "built with" not in l and "configuration" not in l and "lib" not in l and not l.startswith("  ")]
-        raise subprocess.CalledProcessError(result.returncode, "ffmpeg", stderr="
-".join(error_lines[-5:]).encode())
+        error_msg = stderr[-500:] if stderr else "Unknown error"
+        raise subprocess.CalledProcessError(result.returncode, "ffmpeg", stderr=error_msg.encode())
 
     return output_path
 
